@@ -229,6 +229,8 @@ enum class instruction_type : std::uint16_t
 	hlt,
 
 	vpshufb,
+
+	pcmpistri,
 };
 
 struct memory_operand

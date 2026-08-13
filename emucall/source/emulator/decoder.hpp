@@ -388,8 +388,8 @@ inline auto decoder::decode_mov ( const std::uint8_t* bytes, std::size_t& offset
 			}
 			else
 			{
-				instr.operands[ 0 ].size = instr.rex_w ? operand_size::qword : operand_size::dword;
-				instr.operands[ 1 ].size = instr.rex_w ? operand_size::qword : operand_size::dword;
+				instr.operands[ 0 ].size = instr.rex_w ? operand_size::qword : ( instr.has_operand_size ? operand_size::word : operand_size::dword );
+				instr.operands[ 1 ].size = instr.rex_w ? operand_size::qword : ( instr.has_operand_size ? operand_size::word : operand_size::dword );
 			}
 
 			instr.operand_count = 2;
@@ -418,8 +418,8 @@ inline auto decoder::decode_mov ( const std::uint8_t* bytes, std::size_t& offset
 			}
 			else
 			{
-				instr.operands[ 0 ].size = instr.rex_w ? operand_size::qword : operand_size::dword;
-				instr.operands[ 1 ].size = instr.rex_w ? operand_size::qword : operand_size::dword;
+				instr.operands[ 0 ].size = instr.rex_w ? operand_size::qword : ( instr.has_operand_size ? operand_size::word : operand_size::dword );
+				instr.operands[ 1 ].size = instr.rex_w ? operand_size::qword : ( instr.has_operand_size ? operand_size::word : operand_size::dword );
 			}
 
 			instr.operand_count = 2;
@@ -474,22 +474,35 @@ inline auto decoder::decode_mov ( const std::uint8_t* bytes, std::size_t& offset
 			}
 			else
 			{
-				std::int32_t imm32 = 0;
-				std::memcpy ( &imm32, &bytes[ offset ], 4 );
-				offset += 4;
-
-				if ( instr.rex_w )
+				if ( instr.has_operand_size && !instr.rex_w )
 				{
-					instr.operands[ 1 ].imm = static_cast< std::uint64_t > ( static_cast< std::int64_t > ( imm32 ) );
-					instr.operands[ 0 ].size = operand_size::qword;
+					std::uint16_t imm16 = 0;
+					std::memcpy ( &imm16, &bytes[ offset ], 2 );
+					offset += 2;
+
+					instr.operands[ 1 ].imm = imm16;
+					instr.operands[ 0 ].size = operand_size::word;
+					instr.operands[ 1 ].size = operand_size::word;
 				}
 				else
 				{
-					instr.operands[ 1 ].imm = static_cast< std::uint32_t > ( imm32 );
-					instr.operands[ 0 ].size = operand_size::dword;
-				}
+					std::int32_t imm32 = 0;
+					std::memcpy ( &imm32, &bytes[ offset ], 4 );
+					offset += 4;
 
-				instr.operands[ 1 ].size = operand_size::dword;
+					if ( instr.rex_w )
+					{
+						instr.operands[ 1 ].imm = static_cast< std::uint64_t > ( static_cast< std::int64_t > ( imm32 ) );
+						instr.operands[ 0 ].size = operand_size::qword;
+					}
+					else
+					{
+						instr.operands[ 1 ].imm = static_cast< std::uint32_t > ( imm32 );
+						instr.operands[ 0 ].size = operand_size::dword;
+					}
+
+					instr.operands[ 1 ].size = operand_size::dword;
+				}
 			}
 
 			instr.operand_count = 2;
@@ -714,8 +727,8 @@ inline auto decoder::decode_arithmetic ( const std::uint8_t* bytes, std::size_t&
 			instr.operands[ 1 ] = rm_operand;
 		}
 
-		instr.operands[ 0 ].size = instr.rex_w ? operand_size::qword : operand_size::dword;
-		instr.operands[ 1 ].size = instr.rex_w ? operand_size::qword : operand_size::dword;
+		instr.operands[ 0 ].size = instr.rex_w ? operand_size::qword : ( instr.has_operand_size ? operand_size::word : operand_size::dword );
+		instr.operands[ 1 ].size = instr.rex_w ? operand_size::qword : ( instr.has_operand_size ? operand_size::word : operand_size::dword );
 
 		instr.operand_count = 2;
 		instr.length = static_cast< std::uint8_t >( offset );
@@ -811,11 +824,11 @@ inline auto decoder::decode_arithmetic ( const std::uint8_t* bytes, std::size_t&
 			instr.operands[ 1 ] = rm_operand;
 		}
 
-		instr.operands[ 0 ].size = operand_size::byte;
-		instr.operands[ 1 ].size = operand_size::byte;
+		instr.operands[ 0 ].size = instr.rex_w ? operand_size::qword : ( instr.has_operand_size ? operand_size::word : operand_size::dword );
+		instr.operands[ 1 ].size = instr.rex_w ? operand_size::qword : ( instr.has_operand_size ? operand_size::word : operand_size::dword );
 
 		instr.operand_count = 2;
-		instr.length = static_cast< std::uint8_t > ( offset );
+		instr.length = static_cast< std::uint8_t >( offset );
 		return true;
 	}
 
@@ -3074,6 +3087,218 @@ inline auto decoder::decode_two_byte ( const std::uint8_t* bytes, std::size_t& o
 		return true;
 	}
 
+	if ( second_byte == 0x38 )
+	{
+		if ( offset >= max_length )
+		{
+			return false;
+		}
+
+		const auto third_byte = bytes[ offset++ ];
+
+		if ( third_byte == 0x20 || third_byte == 0x21 || third_byte == 0x23 || third_byte == 0x25 || third_byte == 0x3F )
+		{
+			// 66 0F 38 20 /r — PMOVSXBW xmm1, xmm2/m64
+			// 66 0F 38 21 /r — PMOVSXBD xmm1, xmm2/m128
+			// 66 0F 38 23 /r — PMOVSXWD xmm1, xmm2/m64
+			// 66 0F 38 25 /r — PMOVSXDQ xmm1, xmm2/m128
+			// 66 0F 38 3F /r — PMAXUD xmm1, xmm2/m128
+			operand rm_operand;
+			if ( !this->parse_modrm ( bytes, offset, max_length, instr, rm_operand ) )
+			{
+				return false;
+			}
+
+			const auto reg = ( instr.modrm_byte >> 3 ) & 0x07;
+
+			switch ( third_byte )
+			{
+			case 0x20: instr.type = instruction_type::pmovsxbw; break;
+			case 0x21: instr.type = instruction_type::pmovsxbd; break;
+			case 0x23: instr.type = instruction_type::pmovsxwd; break;
+			case 0x25: instr.type = instruction_type::pmovsxdq; break;
+			default:   instr.type = instruction_type::pmaxud;   break;
+			}
+
+			instr.operands[ 0 ].type = operand_type::xmm;
+			instr.operands[ 0 ].xmm = this->get_register ( reg, instr.rex_r );
+
+			if ( rm_operand.type == operand_type::reg )
+			{
+				instr.operands[ 1 ].type = operand_type::xmm;
+				instr.operands[ 1 ].xmm = rm_operand.reg;
+			}
+			else
+			{
+				instr.operands[ 1 ] = rm_operand;
+			}
+
+			instr.operand_count = 2;
+			instr.length = static_cast< std::uint8_t >( offset );
+			return true;
+		}
+
+		return false;
+	}
+
+	if ( second_byte == 0x3A )
+	{
+		if ( offset >= max_length )
+		{
+			return false;
+		}
+
+		const auto third_byte = bytes[ offset++ ];
+
+		if ( third_byte == 0x63 )
+		{
+			// 66 0F 3A 63 /r ib — PCMPISTRI xmm1, xmm2/m128, imm8
+			operand rm_operand;
+			if ( !this->parse_modrm ( bytes, offset, max_length, instr, rm_operand ) )
+			{
+				return false;
+			}
+
+			const auto reg = ( instr.modrm_byte >> 3 ) & 0x07;
+
+			instr.type = instruction_type::pcmpistri;
+
+			instr.operands[ 0 ].type = operand_type::xmm;
+			instr.operands[ 0 ].xmm = this->get_register ( reg, instr.rex_r );
+
+			if ( rm_operand.type == operand_type::reg )
+			{
+				instr.operands[ 1 ].type = operand_type::xmm;
+				instr.operands[ 1 ].xmm = rm_operand.reg;
+			}
+			else
+			{
+				instr.operands[ 1 ] = rm_operand;
+			}
+
+			if ( offset >= max_length )
+			{
+				return false;
+			}
+
+			instr.operands[ 2 ].type = operand_type::imm;
+			instr.operands[ 2 ].imm = bytes[ offset++ ];
+
+			instr.operand_count = 3;
+			instr.length = static_cast< std::uint8_t >( offset );
+			return true;
+		}
+
+		return false;
+	}
+
+	if ( second_byte == 0x76 )
+	{
+		// 66 0F 76 /r — PCMPEQD xmm1, xmm2/m128
+		operand rm_operand;
+		if ( !this->parse_modrm ( bytes, offset, max_length, instr, rm_operand ) )
+		{
+			return false;
+		}
+
+		const auto reg = ( instr.modrm_byte >> 3 ) & 0x07;
+
+		instr.type = instruction_type::pcmpeqd;
+
+		instr.operands[ 0 ].type = operand_type::xmm;
+		instr.operands[ 0 ].xmm = this->get_register ( reg, instr.rex_r );
+
+		if ( rm_operand.type == operand_type::reg )
+		{
+			instr.operands[ 1 ].type = operand_type::xmm;
+			instr.operands[ 1 ].xmm = rm_operand.reg;
+		}
+		else
+		{
+			instr.operands[ 1 ] = rm_operand;
+		}
+
+		instr.operand_count = 2;
+		instr.length = static_cast< std::uint8_t >( offset );
+		return true;
+	}
+
+	if ( second_byte == 0xFA )
+	{
+		// 66 0F FA /r — PSUBD xmm1, xmm2/m128
+		operand rm_operand;
+		if ( !this->parse_modrm ( bytes, offset, max_length, instr, rm_operand ) )
+		{
+			return false;
+		}
+
+		const auto reg = ( instr.modrm_byte >> 3 ) & 0x07;
+
+		instr.type = instruction_type::psubd;
+
+		instr.operands[ 0 ].type = operand_type::xmm;
+		instr.operands[ 0 ].xmm = this->get_register ( reg, instr.rex_r );
+
+		if ( rm_operand.type == operand_type::reg )
+		{
+			instr.operands[ 1 ].type = operand_type::xmm;
+			instr.operands[ 1 ].xmm = rm_operand.reg;
+		}
+		else
+		{
+			instr.operands[ 1 ] = rm_operand;
+		}
+
+		instr.operand_count = 2;
+		instr.length = static_cast< std::uint8_t >( offset );
+		return true;
+	}
+
+	if ( second_byte == 0xFC || second_byte == 0xFD || second_byte == 0xFE ||
+		 second_byte == 0xD4 || second_byte == 0xF8 || second_byte == 0xF9 ||
+		 second_byte == 0xFB )
+	{
+		// 66 0F FC/FD/FE /r — PADDB/PADDW/PADDD xmm1, xmm2/m128
+		// 66 0F D4       /r — PADDQ xmm1, xmm2/m128
+		// 66 0F F8/F9/FB /r — PSUBB/PSUBW/PSUBQ xmm1, xmm2/m128
+		operand rm_operand;
+		if ( !this->parse_modrm ( bytes, offset, max_length, instr, rm_operand ) )
+		{
+			return false;
+		}
+
+		const auto reg = ( instr.modrm_byte >> 3 ) & 0x07;
+
+		switch ( second_byte )
+		{
+			case 0xFC: instr.type = instruction_type::paddb; break;
+			case 0xFD: instr.type = instruction_type::paddw; break;
+			case 0xFE: instr.type = instruction_type::paddd; break;
+			case 0xD4: instr.type = instruction_type::paddq; break;
+			case 0xF8: instr.type = instruction_type::psubb; break;
+			case 0xF9: instr.type = instruction_type::psubw; break;
+			case 0xFB: instr.type = instruction_type::psubq; break;
+			default: return false;
+		}
+
+		instr.operands[ 0 ].type = operand_type::xmm;
+		instr.operands[ 0 ].xmm = this->get_register ( reg, instr.rex_r );
+
+		if ( rm_operand.type == operand_type::reg )
+		{
+			instr.operands[ 1 ].type = operand_type::xmm;
+			instr.operands[ 1 ].xmm = rm_operand.reg;
+		}
+		else
+		{
+			instr.operands[ 1 ] = rm_operand;
+		}
+
+		instr.operand_count = 2;
+		instr.length = static_cast< std::uint8_t >( offset );
+		return true;
+	}
+
 	if ( second_byte == 0x7E )
 	{
 		operand rm_operand;
@@ -3087,9 +3312,16 @@ inline auto decoder::decode_two_byte ( const std::uint8_t* bytes, std::size_t& o
 
 		if ( instr.has_operand_size )
 		{
-			instr.type = instruction_type::movq;
+			// 66 0F 7E without REX.W is MOVD (32-bit: xmm low dword -> r/m32,
+			// zero-extending into the full 64-bit register). Only with
+			// REX.W does this become MOVQ (64-bit). Decoding both as movq
+			// pulled in the xmm's second dword too, corrupting anything
+			// that reads a 32-bit lane out of an xmm via this encoding
+			// (e.g. `movd edi, xmm0`).
+			instr.type = instr.rex_w ? instruction_type::movq : instruction_type::movd;
 
 			instr.operands[ 0 ] = rm_operand;
+			instr.operands[ 0 ].size = instr.rex_w ? operand_size::qword : operand_size::dword;
 			instr.operands[ 1 ].type = operand_type::xmm;
 			instr.operands[ 1 ].xmm = xmm_reg;
 		}

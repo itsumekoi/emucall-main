@@ -688,6 +688,108 @@ namespace instructions
 			return true;
 		}
 
+		inline auto pshuflw ( cpu_state& cpu, const memory_handler& mem, const instruction& instr ) -> bool
+		{
+			if ( instr.operand_count < 3 )
+			{
+				return false;
+			}
+
+			const auto& dst = instr.operands[ 0 ];
+			const auto& src = instr.operands[ 1 ];
+			const auto order = static_cast< std::uint8_t > ( instr.operands[ 2 ].imm );
+
+			std::uint8_t src_data[ 16 ] = { };
+
+			if ( src.type == operand_type::xmm )
+			{
+				std::memcpy ( src_data, cpu.read_xmm ( src.reg ), 16 );
+			}
+			else if ( src.type == operand_type::mem )
+			{
+				const auto address = cpu.calculate_memory_address ( src.mem, instr.address + instr.length );
+				if ( !mem.read ( address, src_data, 16 ) )
+				{
+					return false;
+				}
+			}
+			else
+			{
+				return false;
+			}
+
+			std::uint16_t lanes[ 8 ];
+			std::memcpy ( lanes, src_data, 16 );
+
+			std::uint16_t result[ 8 ];
+			result[ 0 ] = lanes[ ( order >> 0 ) & 0x03 ];
+			result[ 1 ] = lanes[ ( order >> 2 ) & 0x03 ];
+			result[ 2 ] = lanes[ ( order >> 4 ) & 0x03 ];
+			result[ 3 ] = lanes[ ( order >> 6 ) & 0x03 ];
+			result[ 4 ] = lanes[ 4 ];
+			result[ 5 ] = lanes[ 5 ];
+			result[ 6 ] = lanes[ 6 ];
+			result[ 7 ] = lanes[ 7 ];
+
+			std::uint8_t result_data[ 16 ];
+			std::memcpy ( result_data, result, 16 );
+			cpu.write_xmm ( dst.reg, result_data );
+
+			cpu.rip = instr.address + instr.length;
+			return true;
+		}
+
+		inline auto pshufhw ( cpu_state& cpu, const memory_handler& mem, const instruction& instr ) -> bool
+		{
+			if ( instr.operand_count < 3 )
+			{
+				return false;
+			}
+
+			const auto& dst = instr.operands[ 0 ];
+			const auto& src = instr.operands[ 1 ];
+			const auto order = static_cast< std::uint8_t > ( instr.operands[ 2 ].imm );
+
+			std::uint8_t src_data[ 16 ] = { };
+
+			if ( src.type == operand_type::xmm )
+			{
+				std::memcpy ( src_data, cpu.read_xmm ( src.reg ), 16 );
+			}
+			else if ( src.type == operand_type::mem )
+			{
+				const auto address = cpu.calculate_memory_address ( src.mem, instr.address + instr.length );
+				if ( !mem.read ( address, src_data, 16 ) )
+				{
+					return false;
+				}
+			}
+			else
+			{
+				return false;
+			}
+
+			std::uint16_t lanes[ 8 ];
+			std::memcpy ( lanes, src_data, 16 );
+
+			std::uint16_t result[ 8 ];
+			result[ 0 ] = lanes[ 0 ];
+			result[ 1 ] = lanes[ 1 ];
+			result[ 2 ] = lanes[ 2 ];
+			result[ 3 ] = lanes[ 3 ];
+			result[ 4 ] = lanes[ 4 + ( ( order >> 0 ) & 0x03 ) ];
+			result[ 5 ] = lanes[ 4 + ( ( order >> 2 ) & 0x03 ) ];
+			result[ 6 ] = lanes[ 4 + ( ( order >> 4 ) & 0x03 ) ];
+			result[ 7 ] = lanes[ 4 + ( ( order >> 6 ) & 0x03 ) ];
+
+			std::uint8_t result_data[ 16 ];
+			std::memcpy ( result_data, result, 16 );
+			cpu.write_xmm ( dst.reg, result_data );
+
+			cpu.rip = instr.address + instr.length;
+			return true;
+		}
+
 		inline auto psrldq ( cpu_state& cpu, const memory_handler& mem, const instruction& instr ) -> bool
 		{
 			if ( instr.operand_count < 2 )
@@ -2376,6 +2478,697 @@ namespace instructions
 		inline auto movdqu ( cpu_state& cpu, const memory_handler& mem, const instruction& instr ) -> bool
 		{
 			return instructions::sse::movdqa ( cpu, mem, instr );
+		}
+
+		inline auto psubd ( cpu_state& cpu, const memory_handler& mem, const instruction& instr ) -> bool
+		{
+			if ( instr.operand_count < 2 )
+			{
+				return false;
+			}
+
+			const auto& dst = instr.operands[ 0 ];
+			const auto& src = instr.operands[ 1 ];
+
+			if ( dst.type != operand_type::xmm )
+			{
+				return false;
+			}
+
+			std::uint8_t src_data[ 16 ];
+
+			if ( src.type == operand_type::xmm )
+			{
+				const auto* xmm_data = cpu.read_xmm ( src.xmm );
+				std::memcpy ( src_data, xmm_data, 16 );
+			}
+			else if ( src.type == operand_type::mem )
+			{
+				const auto address = cpu.calculate_memory_address ( src.mem, instr.address + instr.length );
+				if ( !mem.read ( address, src_data, 16 ) )
+				{
+					return false;
+				}
+			}
+			else
+			{
+				return false;
+			}
+
+			std::uint8_t dst_data[ 16 ];
+			std::memcpy ( dst_data, cpu.read_xmm ( dst.xmm ), 16 );
+
+			std::int32_t dst_lanes[ 4 ];
+			std::int32_t src_lanes[ 4 ];
+			std::memcpy ( dst_lanes, dst_data, sizeof ( dst_lanes ) );
+			std::memcpy ( src_lanes, src_data, sizeof ( src_lanes ) );
+
+			std::uint8_t result[ 16 ];
+			for ( int i = 0; i < 4; ++i )
+			{
+				const std::int32_t value = dst_lanes[ i ] - src_lanes[ i ];
+				std::memcpy ( result + ( i * 4 ), &value, 4 );
+			}
+
+			cpu.write_xmm ( dst.xmm, result );
+
+			return true;
+		}
+
+		inline auto pcmpeqd ( cpu_state& cpu, const memory_handler& mem, const instruction& instr ) -> bool
+		{
+			if ( instr.operand_count < 2 )
+			{
+				return false;
+			}
+
+			const auto& dst = instr.operands[ 0 ];
+			const auto& src = instr.operands[ 1 ];
+
+			if ( dst.type != operand_type::xmm )
+			{
+				return false;
+			}
+
+			std::uint8_t src_data[ 16 ];
+
+			if ( src.type == operand_type::xmm )
+			{
+				const auto* xmm_data = cpu.read_xmm ( src.xmm );
+				std::memcpy ( src_data, xmm_data, 16 );
+			}
+			else if ( src.type == operand_type::mem )
+			{
+				const auto address = cpu.calculate_memory_address ( src.mem, instr.address + instr.length );
+				if ( !mem.read ( address, src_data, 16 ) )
+				{
+					return false;
+				}
+			}
+			else
+			{
+				return false;
+			}
+
+			std::uint8_t dst_data[ 16 ];
+			std::memcpy ( dst_data, cpu.read_xmm ( dst.xmm ), 16 );
+
+			std::uint32_t dst_lanes[ 4 ];
+			std::uint32_t src_lanes[ 4 ];
+			std::memcpy ( dst_lanes, dst_data, sizeof ( dst_lanes ) );
+			std::memcpy ( src_lanes, src_data, sizeof ( src_lanes ) );
+
+			std::uint8_t result[ 16 ];
+			for ( int i = 0; i < 4; ++i )
+			{
+				const std::uint32_t value = ( dst_lanes[ i ] == src_lanes[ i ] ) ? 0xFFFFFFFFu : 0u;
+				std::memcpy ( result + ( i * 4 ), &value, 4 );
+			}
+
+			cpu.write_xmm ( dst.xmm, result );
+
+			return true;
+		}
+
+		// 66 0F 3A 63 /r ib — PCMPISTRI xmm1, xmm2/m128, imm8
+		// SSE4.2 "implicit length" string compare. Used by UE's character
+		// classification/search helpers (e.g. FindFirstChar) to scan up to
+		// 8/16 chars per instruction instead of a byte-at-a-time loop.
+		inline auto pcmpistri ( cpu_state& cpu, const memory_handler& mem, const instruction& instr ) -> bool
+		{
+			if ( instr.operand_count < 3 )
+			{
+				return false;
+			}
+
+			const auto& dst = instr.operands[ 0 ];
+			const auto& src = instr.operands[ 1 ];
+			const auto& ctrl_op = instr.operands[ 2 ];
+
+			if ( dst.type != operand_type::xmm || ctrl_op.type != operand_type::imm )
+			{
+				return false;
+			}
+
+			std::uint8_t xmm1[ 16 ];
+			std::memcpy ( xmm1, cpu.read_xmm ( dst.xmm ), 16 );
+
+			std::uint8_t xmm2[ 16 ];
+
+			if ( src.type == operand_type::xmm )
+			{
+				std::memcpy ( xmm2, cpu.read_xmm ( src.xmm ), 16 );
+			}
+			else if ( src.type == operand_type::mem )
+			{
+				const auto address = cpu.calculate_memory_address ( src.mem, instr.address + instr.length );
+				if ( !mem.read ( address, xmm2, 16 ) )
+				{
+					return false;
+				}
+			}
+			else
+			{
+				return false;
+			}
+
+			const auto control = static_cast< std::uint8_t > ( ctrl_op.imm );
+
+			const auto is_word = ( control & 0x01 ) != 0;
+			const auto is_signed = ( control & 0x02 ) != 0;
+			const auto aggregation = ( control >> 2 ) & 0x03;
+			const auto negate = ( control & 0x10 ) != 0;
+			const auto negate_valid_only = ( control & 0x20 ) != 0;
+			const auto use_msb_index = ( control & 0x40 ) != 0;
+
+			const int size = is_word ? 8 : 16;
+
+			// Byte/word, signed/unsigned element accessor sharing one comparison path.
+			const auto element = [ & ] ( const std::uint8_t* data, int index ) -> std::int32_t
+			{
+				if ( is_word )
+				{
+					std::uint16_t raw;
+					std::memcpy ( &raw, data + ( index * 2 ), 2 );
+					return is_signed ? static_cast< std::int32_t > ( static_cast< std::int16_t > ( raw ) )
+									  : static_cast< std::int32_t > ( raw );
+				}
+
+				const std::uint8_t raw = data[ index ];
+				return is_signed ? static_cast< std::int32_t > ( static_cast< std::int8_t > ( raw ) )
+								  : static_cast< std::int32_t > ( raw );
+			};
+
+			// "Implicit length" mode: index of the first zero element, or size if none.
+			const auto implicit_length = [ & ] ( const std::uint8_t* data ) -> int
+			{
+				for ( int i = 0; i < size; ++i )
+				{
+					if ( element ( data, i ) == 0 )
+					{
+						return i;
+					}
+				}
+
+				return size;
+			};
+
+			const auto len1 = implicit_length ( xmm1 );
+			const auto len2 = implicit_length ( xmm2 );
+
+			std::uint32_t int_res1 = 0;
+
+			switch ( aggregation )
+			{
+				case 0: // equal any
+				{
+					for ( int j = 0; j < len2; ++j )
+					{
+						for ( int i = 0; i < len1; ++i )
+						{
+							if ( element ( xmm2, j ) == element ( xmm1, i ) )
+							{
+								int_res1 |= ( 1u << j );
+								break;
+							}
+						}
+					}
+					break;
+				}
+
+				case 1: // ranges
+				{
+					for ( int j = 0; j < len2; ++j )
+					{
+						for ( int i = 0; ( i + 1 ) < len1; i += 2 )
+						{
+							const auto lo = element ( xmm1, i );
+							const auto hi = element ( xmm1, i + 1 );
+							const auto value = element ( xmm2, j );
+
+							if ( value >= lo && value <= hi )
+							{
+								int_res1 |= ( 1u << j );
+								break;
+							}
+						}
+					}
+					break;
+				}
+
+				case 2: // equal each
+				{
+					for ( int j = 0; j < size; ++j )
+					{
+						const auto valid1 = j < len1;
+						const auto valid2 = j < len2;
+
+						const bool match = ( valid1 && valid2 )
+							? ( element ( xmm1, j ) == element ( xmm2, j ) )
+							: ( !valid1 && !valid2 );
+
+						if ( match )
+						{
+							int_res1 |= ( 1u << j );
+						}
+					}
+					break;
+				}
+
+				default: // equal ordered (substring search)
+				{
+					for ( int j = 0; j < size; ++j )
+					{
+						bool match = true;
+
+						for ( int i = 0; i < size - j; ++i )
+						{
+							if ( i >= len1 )
+							{
+								break;
+							}
+
+							const auto pos2 = j + i;
+
+							if ( pos2 >= len2 || element ( xmm1, i ) != element ( xmm2, pos2 ) )
+							{
+								match = false;
+								break;
+							}
+						}
+
+						if ( match )
+						{
+							int_res1 |= ( 1u << j );
+						}
+					}
+					break;
+				}
+			}
+
+			const std::uint32_t size_mask = ( size == 16 ) ? 0xFFFFu : 0xFFu;
+			int_res1 &= size_mask;
+
+			std::uint32_t int_res2 = int_res1;
+
+			if ( negate )
+			{
+				if ( negate_valid_only )
+				{
+					for ( int j = 0; j < len2; ++j )
+					{
+						int_res2 ^= ( 1u << j );
+					}
+				}
+				else
+				{
+					int_res2 = ( ~int_res1 ) & size_mask;
+				}
+			}
+
+			std::uint32_t ecx = static_cast< std::uint32_t > ( size );
+
+			if ( use_msb_index )
+			{
+				ecx = 0;
+
+				for ( int i = size - 1; i >= 0; --i )
+				{
+					if ( int_res2 & ( 1u << i ) )
+					{
+						ecx = static_cast< std::uint32_t > ( i );
+						break;
+					}
+				}
+			}
+			else
+			{
+				for ( int i = 0; i < size; ++i )
+				{
+					if ( int_res2 & ( 1u << i ) )
+					{
+						ecx = static_cast< std::uint32_t > ( i );
+						break;
+					}
+				}
+			}
+
+			cpu.write_gpr ( 1, static_cast< std::uint64_t > ( ecx ) );
+
+			cpu.set_flag ( cpu_state::flag_cf, int_res2 != 0 );
+			cpu.set_flag ( cpu_state::flag_zf, len2 < size );
+			cpu.set_flag ( cpu_state::flag_sf, len1 < size );
+			cpu.set_flag ( cpu_state::flag_of, ( int_res2 & 0x1u ) != 0 );
+			cpu.set_flag ( cpu_state::flag_pf, false );
+
+			return true;
+		}
+
+		inline auto pmaxud ( cpu_state& cpu, const memory_handler& mem, const instruction& instr ) -> bool
+		{
+			if ( instr.operand_count < 2 )
+			{
+				return false;
+			}
+
+			const auto& dst = instr.operands[ 0 ];
+			const auto& src = instr.operands[ 1 ];
+
+			if ( dst.type != operand_type::xmm )
+			{
+				return false;
+			}
+
+			std::uint8_t src_data[ 16 ];
+
+			if ( src.type == operand_type::xmm )
+			{
+				const auto* xmm_data = cpu.read_xmm ( src.xmm );
+				std::memcpy ( src_data, xmm_data, 16 );
+			}
+			else if ( src.type == operand_type::mem )
+			{
+				const auto address = cpu.calculate_memory_address ( src.mem, instr.address + instr.length );
+				if ( !mem.read ( address, src_data, 16 ) )
+				{
+					return false;
+				}
+			}
+			else
+			{
+				return false;
+			}
+
+			std::uint8_t dst_data[ 16 ];
+			std::memcpy ( dst_data, cpu.read_xmm ( dst.xmm ), 16 );
+
+			std::uint32_t dst_lanes[ 4 ];
+			std::uint32_t src_lanes[ 4 ];
+			std::memcpy ( dst_lanes, dst_data, sizeof ( dst_lanes ) );
+			std::memcpy ( src_lanes, src_data, sizeof ( src_lanes ) );
+
+			std::uint8_t result[ 16 ];
+			for ( int i = 0; i < 4; ++i )
+			{
+				const std::uint32_t value = dst_lanes[ i ] > src_lanes[ i ] ? dst_lanes[ i ] : src_lanes[ i ];
+				std::memcpy ( result + ( i * 4 ), &value, 4 );
+			}
+
+			cpu.write_xmm ( dst.xmm, result );
+
+			return true;
+		}
+
+		template < typename lane_t, typename op_t >
+		inline auto packed_int_binop ( cpu_state& cpu, const memory_handler& mem, const instruction& instr, op_t op ) -> bool
+		{
+			if ( instr.operand_count < 2 )
+			{
+				return false;
+			}
+
+			const auto& dst = instr.operands[ 0 ];
+			const auto& src = instr.operands[ 1 ];
+
+			if ( dst.type != operand_type::xmm )
+			{
+				return false;
+			}
+
+			std::uint8_t src_data[ 16 ];
+
+			if ( src.type == operand_type::xmm )
+			{
+				std::memcpy ( src_data, cpu.read_xmm ( src.xmm ), 16 );
+			}
+			else if ( src.type == operand_type::mem )
+			{
+				const auto address = cpu.calculate_memory_address ( src.mem, instr.address + instr.length );
+				if ( !mem.read ( address, src_data, 16 ) )
+				{
+					return false;
+				}
+			}
+			else
+			{
+				return false;
+			}
+
+			std::uint8_t dst_data[ 16 ];
+			std::memcpy ( dst_data, cpu.read_xmm ( dst.xmm ), 16 );
+
+			constexpr std::size_t count = 16 / sizeof ( lane_t );
+			lane_t dst_lanes[ count ];
+			lane_t src_lanes[ count ];
+			std::memcpy ( dst_lanes, dst_data, 16 );
+			std::memcpy ( src_lanes, src_data, 16 );
+
+			lane_t result[ count ];
+			for ( std::size_t i = 0; i < count; ++i )
+			{
+				result[ i ] = op ( dst_lanes[ i ], src_lanes[ i ] );
+			}
+
+			std::uint8_t result_data[ 16 ];
+			std::memcpy ( result_data, result, 16 );
+			cpu.write_xmm ( dst.xmm, result_data );
+
+			return true;
+		}
+
+		inline auto paddb ( cpu_state& cpu, const memory_handler& mem, const instruction& instr ) -> bool
+		{
+			return packed_int_binop< std::uint8_t > ( cpu, mem, instr, [ ] ( std::uint8_t a, std::uint8_t b ) { return static_cast< std::uint8_t > ( a + b ); } );
+		}
+
+		inline auto paddw ( cpu_state& cpu, const memory_handler& mem, const instruction& instr ) -> bool
+		{
+			return packed_int_binop< std::uint16_t > ( cpu, mem, instr, [ ] ( std::uint16_t a, std::uint16_t b ) { return static_cast< std::uint16_t > ( a + b ); } );
+		}
+
+		inline auto paddd ( cpu_state& cpu, const memory_handler& mem, const instruction& instr ) -> bool
+		{
+			return packed_int_binop< std::uint32_t > ( cpu, mem, instr, [ ] ( std::uint32_t a, std::uint32_t b ) { return static_cast< std::uint32_t > ( a + b ); } );
+		}
+
+		inline auto paddq ( cpu_state& cpu, const memory_handler& mem, const instruction& instr ) -> bool
+		{
+			return packed_int_binop< std::uint64_t > ( cpu, mem, instr, [ ] ( std::uint64_t a, std::uint64_t b ) { return static_cast< std::uint64_t > ( a + b ); } );
+		}
+
+		inline auto psubb ( cpu_state& cpu, const memory_handler& mem, const instruction& instr ) -> bool
+		{
+			return packed_int_binop< std::uint8_t > ( cpu, mem, instr, [ ] ( std::uint8_t a, std::uint8_t b ) { return static_cast< std::uint8_t > ( a - b ); } );
+		}
+
+		inline auto psubw ( cpu_state& cpu, const memory_handler& mem, const instruction& instr ) -> bool
+		{
+			return packed_int_binop< std::uint16_t > ( cpu, mem, instr, [ ] ( std::uint16_t a, std::uint16_t b ) { return static_cast< std::uint16_t > ( a - b ); } );
+		}
+
+		inline auto psubq ( cpu_state& cpu, const memory_handler& mem, const instruction& instr ) -> bool
+		{
+			return packed_int_binop< std::uint64_t > ( cpu, mem, instr, [ ] ( std::uint64_t a, std::uint64_t b ) { return static_cast< std::uint64_t > ( a - b ); } );
+		}
+
+		inline auto pmovsxbw ( cpu_state& cpu, const memory_handler& mem, const instruction& instr ) -> bool
+		{
+			if ( instr.operand_count < 2 )
+			{
+				return false;
+			}
+
+			const auto& dst = instr.operands[ 0 ];
+			const auto& src = instr.operands[ 1 ];
+
+			std::uint8_t src_data[ 8 ] = { };
+
+			if ( src.type == operand_type::xmm )
+			{
+				const auto* xmm_data = cpu.read_xmm ( src.xmm );
+				std::memcpy ( src_data, xmm_data, 8 );
+			}
+			else if ( src.type == operand_type::mem )
+			{
+				const auto address = cpu.calculate_memory_address ( src.mem, instr.address + instr.length );
+				if ( !mem.read ( address, src_data, 8 ) )
+				{
+					return false;
+				}
+			}
+			else
+			{
+				return false;
+			}
+
+			std::int8_t bytes[ 8 ];
+			std::memcpy ( bytes, src_data, sizeof ( bytes ) );
+
+			std::uint8_t result[ 16 ];
+			for ( int i = 0; i < 8; ++i )
+			{
+				const std::int16_t value = bytes[ i ];
+				std::memcpy ( result + ( i * 2 ), &value, 2 );
+			}
+
+			if ( dst.type != operand_type::xmm )
+			{
+				return false;
+			}
+
+			cpu.write_xmm ( dst.xmm, result );
+
+			return true;
+		}
+
+		inline auto pmovsxbd ( cpu_state& cpu, const memory_handler& mem, const instruction& instr ) -> bool
+		{
+			if ( instr.operand_count < 2 )
+			{
+				return false;
+			}
+
+			const auto& dst = instr.operands[ 0 ];
+			const auto& src = instr.operands[ 1 ];
+
+			std::uint8_t src_data[ 4 ] = { };
+
+			if ( src.type == operand_type::xmm )
+			{
+				const auto* xmm_data = cpu.read_xmm ( src.xmm );
+				std::memcpy ( src_data, xmm_data, 4 );
+			}
+			else if ( src.type == operand_type::mem )
+			{
+				const auto address = cpu.calculate_memory_address ( src.mem, instr.address + instr.length );
+				if ( !mem.read ( address, src_data, 4 ) )
+				{
+					return false;
+				}
+			}
+			else
+			{
+				return false;
+			}
+
+			std::int8_t bytes[ 4 ];
+			std::memcpy ( bytes, src_data, sizeof ( bytes ) );
+
+			std::uint8_t result[ 16 ];
+			for ( int i = 0; i < 4; ++i )
+			{
+				const std::int32_t value = bytes[ i ];
+				std::memcpy ( result + ( i * 4 ), &value, 4 );
+			}
+
+			if ( dst.type != operand_type::xmm )
+			{
+				return false;
+			}
+
+			cpu.write_xmm ( dst.xmm, result );
+
+			return true;
+		}
+
+		inline auto pmovsxwd ( cpu_state& cpu, const memory_handler& mem, const instruction& instr ) -> bool
+		{
+			if ( instr.operand_count < 2 )
+			{
+				return false;
+			}
+
+			const auto& dst = instr.operands[ 0 ];
+			const auto& src = instr.operands[ 1 ];
+
+			std::uint8_t src_data[ 8 ] = { };
+
+			if ( src.type == operand_type::xmm )
+			{
+				const auto* xmm_data = cpu.read_xmm ( src.xmm );
+				std::memcpy ( src_data, xmm_data, 8 );
+			}
+			else if ( src.type == operand_type::mem )
+			{
+				const auto address = cpu.calculate_memory_address ( src.mem, instr.address + instr.length );
+				if ( !mem.read ( address, src_data, 8 ) )
+				{
+					return false;
+				}
+			}
+			else
+			{
+				return false;
+			}
+
+			std::int16_t words[ 4 ];
+			std::memcpy ( words, src_data, sizeof ( words ) );
+
+			std::uint8_t result[ 16 ];
+			for ( int i = 0; i < 4; ++i )
+			{
+				const std::int32_t value = words[ i ];
+				std::memcpy ( result + ( i * 4 ), &value, 4 );
+			}
+
+			if ( dst.type != operand_type::xmm )
+			{
+				return false;
+			}
+
+			cpu.write_xmm ( dst.xmm, result );
+
+			return true;
+		}
+
+		inline auto pmovsxdq ( cpu_state& cpu, const memory_handler& mem, const instruction& instr ) -> bool
+		{
+			if ( instr.operand_count < 2 )
+			{
+				return false;
+			}
+
+			const auto& dst = instr.operands[ 0 ];
+			const auto& src = instr.operands[ 1 ];
+
+			std::uint8_t src_data[ 8 ] = { };
+
+			if ( src.type == operand_type::xmm )
+			{
+				const auto* xmm_data = cpu.read_xmm ( src.xmm );
+				std::memcpy ( src_data, xmm_data, 8 );
+			}
+			else if ( src.type == operand_type::mem )
+			{
+				const auto address = cpu.calculate_memory_address ( src.mem, instr.address + instr.length );
+				if ( !mem.read ( address, src_data, 8 ) )
+				{
+					return false;
+				}
+			}
+			else
+			{
+				return false;
+			}
+
+			std::int32_t dwords[ 2 ];
+			std::memcpy ( dwords, src_data, sizeof ( dwords ) );
+
+			std::uint8_t result[ 16 ];
+			for ( int i = 0; i < 2; ++i )
+			{
+				const std::int64_t value = dwords[ i ];
+				std::memcpy ( result + ( i * 8 ), &value, 8 );
+			}
+
+			if ( dst.type != operand_type::xmm )
+			{
+				return false;
+			}
+
+			cpu.write_xmm ( dst.xmm, result );
+
+			return true;
 		}
 
 		inline auto movlps ( cpu_state& cpu, const memory_handler& mem, const instruction& instr ) -> bool

@@ -172,7 +172,7 @@ inline auto emulator::dump_trace ( ) -> void
 		this->log ( "  [-%2zu] rip=0x%llx (ida: 0x%llx) type=%u len=%u  %02x %02x %02x %02x %02x %02x %02x %02x\n",
 					this->m_trace_count - i,
 					static_cast< unsigned long long > ( entry.rip ),
-					static_cast< unsigned long long > ( 0x180000000 + entry.rip - this->m_base ),
+					static_cast< unsigned long long > ( entry.rip - this->m_base ),
 					static_cast< unsigned > ( entry.type ),
 					static_cast< unsigned > ( entry.length ),
 					entry.bytes[ 0 ], entry.bytes[ 1 ], entry.bytes[ 2 ], entry.bytes[ 3 ],
@@ -682,6 +682,81 @@ inline auto emulator::execute ( const instruction& instr ) -> bool
 			return instructions::sse::movdqu ( this->m_cpu, this->m_memory, instr );
 		}
 
+		case instruction_type::pmovsxbw:
+		{
+			return instructions::sse::pmovsxbw ( this->m_cpu, this->m_memory, instr );
+		}
+
+		case instruction_type::pmovsxbd:
+		{
+			return instructions::sse::pmovsxbd ( this->m_cpu, this->m_memory, instr );
+		}
+
+		case instruction_type::pmovsxwd:
+		{
+			return instructions::sse::pmovsxwd ( this->m_cpu, this->m_memory, instr );
+		}
+
+		case instruction_type::pmovsxdq:
+		{
+			return instructions::sse::pmovsxdq ( this->m_cpu, this->m_memory, instr );
+		}
+
+		case instruction_type::pmaxud:
+		{
+			return instructions::sse::pmaxud ( this->m_cpu, this->m_memory, instr );
+		}
+
+		case instruction_type::pcmpeqd:
+		{
+			return instructions::sse::pcmpeqd ( this->m_cpu, this->m_memory, instr );
+		}
+
+		case instruction_type::pcmpistri:
+		{
+			return instructions::sse::pcmpistri ( this->m_cpu, this->m_memory, instr );
+		}
+
+		case instruction_type::psubd:
+		{
+			return instructions::sse::psubd ( this->m_cpu, this->m_memory, instr );
+		}
+
+		case instruction_type::paddb:
+		{
+			return instructions::sse::paddb ( this->m_cpu, this->m_memory, instr );
+		}
+
+		case instruction_type::paddw:
+		{
+			return instructions::sse::paddw ( this->m_cpu, this->m_memory, instr );
+		}
+
+		case instruction_type::paddd:
+		{
+			return instructions::sse::paddd ( this->m_cpu, this->m_memory, instr );
+		}
+
+		case instruction_type::paddq:
+		{
+			return instructions::sse::paddq ( this->m_cpu, this->m_memory, instr );
+		}
+
+		case instruction_type::psubb:
+		{
+			return instructions::sse::psubb ( this->m_cpu, this->m_memory, instr );
+		}
+
+		case instruction_type::psubw:
+		{
+			return instructions::sse::psubw ( this->m_cpu, this->m_memory, instr );
+		}
+
+		case instruction_type::psubq:
+		{
+			return instructions::sse::psubq ( this->m_cpu, this->m_memory, instr );
+		}
+
 		case instruction_type::movq:
 		{
 			return instructions::sse::movq ( this->m_cpu, this->m_memory, instr );
@@ -805,6 +880,16 @@ inline auto emulator::execute ( const instruction& instr ) -> bool
 		case instruction_type::pshufd:
 		{
 			return instructions::sse::pshufd ( this->m_cpu, this->m_memory, instr );
+		}
+
+		case instruction_type::pshuflw:
+		{
+			return instructions::sse::pshuflw ( this->m_cpu, this->m_memory, instr );
+		}
+
+		case instruction_type::pshufhw:
+		{
+			return instructions::sse::pshufhw ( this->m_cpu, this->m_memory, instr );
 		}
 
 		case instruction_type::psrldq:
@@ -1191,7 +1276,7 @@ inline auto emulator::step ( std::uint64_t address ) -> bool
 	{
 		this->log ( "[emu] FAIL decode rip=0x%llx (ida: 0x%llx) bytes=%02x %02x %02x %02x %02x %02x %02x %02x\n",
 					  static_cast< unsigned long long > ( address ),
-					  static_cast< unsigned long long > ( 0x180000000 + address - this->m_base ),
+					  static_cast< unsigned long long > ( address - this->m_base ),
 					  instruction_bytes[ 0 ], instruction_bytes[ 1 ], instruction_bytes[ 2 ], instruction_bytes[ 3 ],
 					  instruction_bytes[ 4 ], instruction_bytes[ 5 ], instruction_bytes[ 6 ], instruction_bytes[ 7 ] );
 		return false;
@@ -1203,7 +1288,7 @@ inline auto emulator::step ( std::uint64_t address ) -> bool
 	{
 		this->log ( "[emu] FAIL invalid length rip=0x%llx (ida: 0x%llx) len=%u bytes=%02x %02x %02x %02x %02x\n",
 					static_cast< unsigned long long > ( address ),
-					static_cast< unsigned long long > ( 0x180000000 + address - this->m_base ),
+					static_cast< unsigned long long > ( address - this->m_base ),
 					static_cast< unsigned > ( instr.length ),
 					instruction_bytes[ 0 ], instruction_bytes[ 1 ],
 					instruction_bytes[ 2 ], instruction_bytes[ 3 ],
@@ -1213,7 +1298,7 @@ inline auto emulator::step ( std::uint64_t address ) -> bool
 
 	this->log ( "[emu] rip=0x%llx (ida: 0x%llx) type=%d len=%u\n",
 				static_cast< unsigned long long > ( address ),
-				static_cast< unsigned long long > ( 0x180000000 + address - this->m_base ),
+				static_cast< unsigned long long > ( address - this->m_base ),
 				static_cast< int > ( instr.type ),
 				static_cast< unsigned > ( instr.length ) );
 
@@ -1221,7 +1306,7 @@ inline auto emulator::step ( std::uint64_t address ) -> bool
 	{
 		this->log ( "[emu] FAIL execute rip=0x%llx (ida: 0x%llx) type=%d bytes=%02x %02x %02x %02x %02x %02x %02x %02x fault_addr=0x%llx (%s)\n",
 					  static_cast< unsigned long long > ( address ),
-					  static_cast< unsigned long long > ( 0x180000000 + address - this->m_base ),
+					  static_cast< unsigned long long > ( address - this->m_base ),
 					  static_cast< int > ( instr.type ),
 					  instruction_bytes[ 0 ], instruction_bytes[ 1 ], instruction_bytes[ 2 ], instruction_bytes[ 3 ],
 					  instruction_bytes[ 4 ], instruction_bytes[ 5 ], instruction_bytes[ 6 ], instruction_bytes[ 7 ],
@@ -1299,7 +1384,7 @@ inline auto emulator::run ( std::uint64_t start_address, std::uint64_t end_addre
 		this->log ( "[emu] run FAIL budget exhausted after %zu instructions, rip=0x%llx (ida: 0x%llx) stopped=%d\n",
 					instruction_count,
 					static_cast< unsigned long long > ( this->m_cpu.rip ),
-					static_cast< unsigned long long > ( 0x180000000 + this->m_cpu.rip - this->m_base ),
+					static_cast< unsigned long long > ( this->m_cpu.rip - this->m_base ),
 					this->m_should_stop ? 1 : 0 );
 	}
 

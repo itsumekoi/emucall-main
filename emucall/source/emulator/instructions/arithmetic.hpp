@@ -1699,7 +1699,10 @@ namespace instructions
 
 			if ( src.type == operand_type::imm )
 			{
-				count = src.imm & 0x3F;
+				// The decoder encodes the CL-count form (D2/D3) as an imm
+				// operand carrying cl_sentinel, meaning "read CL at runtime"
+				// rather than a literal shift amount.
+				count = ( src.imm == cpu_state::cl_sentinel ? cpu.read_gpr ( 1 ) : src.imm ) & 0x3F;
 			}
 			else
 			{
@@ -1772,7 +1775,7 @@ namespace instructions
 
 			if ( src.type == operand_type::imm )
 			{
-				count = src.imm & 0x3F;
+				count = ( src.imm == cpu_state::cl_sentinel ? cpu.read_gpr ( 1 ) : src.imm ) & 0x3F;
 			}
 			else
 			{
@@ -1842,7 +1845,7 @@ namespace instructions
 
 			if ( src.type == operand_type::imm )
 			{
-				count = src.imm & 0x3F;
+				count = ( src.imm == cpu_state::cl_sentinel ? cpu.read_gpr ( 1 ) : src.imm ) & 0x3F;
 			}
 			else
 			{
@@ -1916,7 +1919,7 @@ namespace instructions
 
 			if ( src.type == operand_type::imm )
 			{
-				count = src.imm & 0x3F;
+				count = ( src.imm == cpu_state::cl_sentinel ? cpu.read_gpr ( 1 ) : src.imm ) & 0x3F;
 			}
 			else
 			{
@@ -1990,7 +1993,7 @@ namespace instructions
 
 			if ( src.type == operand_type::imm )
 			{
-				count = src.imm & 0x3F;
+				count = ( src.imm == cpu_state::cl_sentinel ? cpu.read_gpr ( 1 ) : src.imm ) & 0x3F;
 			}
 			else
 			{

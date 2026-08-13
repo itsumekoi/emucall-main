@@ -139,7 +139,16 @@ public:
 
 	auto attach ( const wchar_t* name ) -> bool
 	{
-		return this->attach ( this->get_process_id ( name ) );
+		const auto pid = this->get_process_id ( name );
+
+		if ( !this->attach ( pid ) )
+		{
+			return false;
+		}
+
+		this->image_base = this->get_module_base ( pid, name );
+
+		return true;
 	}
 
 	auto detach ( ) -> void
@@ -151,13 +160,14 @@ public:
 
 		this->handle = nullptr;
 		this->process_id = 0;
+		this->image_base = 0;
 		this->unity_player = 0;
 		this->game_assembly = 0;
 	}
 public:
 	HANDLE handle = nullptr;
 	std::uint32_t process_id = 0;
-
+	std::uint64_t image_base = 0;
 	std::uint64_t unity_player = 0;
 	std::uint64_t game_assembly = 0;
 };

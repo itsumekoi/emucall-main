@@ -135,6 +135,12 @@ private:
 
 	static auto return_from_hook ( cpu_state& cpu, const memory_handler& mem ) -> bool;
 
+	static auto resolve_import ( std::uint64_t module_base, const char* import_name ) -> std::uint64_t;
+
+	static auto make_memcpy_hook ( ) -> hook_fn;
+
+	auto register_crt_import_hooks ( std::uint64_t module_base ) -> void;
+
 	auto register_win32_hooks ( ) -> void;
 	auto register_heap_hooks ( ) -> void;
 
@@ -868,6 +874,7 @@ inline auto extcall::register_module ( std::uint64_t base, const memory_handler&
 	}
 
 	this->register_module ( base, static_cast< std::uint64_t > ( size ) );
+	this->register_crt_import_hooks ( base );
 }
 
 inline auto extcall::register_module ( std::uint64_t base ) -> void
@@ -1003,6 +1010,139 @@ inline auto extcall::find_pattern ( std::uint64_t module_base, const char* patte
 	return 0;
 }
 
+inline auto extcall::resolve_import ( std::uint64_t module_base, const char* import_name ) -> std::uint64_t
+{
+	std::uint32_t e_lfanew = 0;
+
+	if ( !memory->read_memory ( module_base + 0x3C, &e_lfanew, 4 ) )
+	{
+		return 0;
+	}
+
+	std::uint32_t import_table_rva = 0;
+
+	if ( !memory->read_memory ( module_base + e_lfanew + 0x90, &import_table_rva, 4 ) || import_table_rva == 0 )
+	{
+		return 0;
+	}
+
+	const auto name_length = std::strlen ( import_name );
+
+	for ( std::uint64_t descriptor_addr = module_base + import_table_rva; ; descriptor_addr += 20 )
+	{
+		std::uint32_t original_first_thunk = 0;
+		std::uint32_t first_thunk = 0;
+		std::uint32_t name_rva = 0;
+
+		if ( !memory->read_memory ( descriptor_addr, &original_first_thunk, 4 )
+			 || !memory->read_memory ( descriptor_addr + 12, &name_rva, 4 )
+			 || !memory->read_memory ( descriptor_addr + 16, &first_thunk, 4 ) )
+		{
+			return 0;
+		}
+
+		if ( original_first_thunk == 0 && first_thunk == 0 && name_rva == 0 )
+		{
+			return 0;
+		}
+
+		const auto name_thunk_rva = original_first_thunk != 0 ? original_first_thunk : first_thunk;
+
+		if ( name_thunk_rva == 0 || first_thunk == 0 )
+		{
+			continue;
+		}
+
+		for ( std::uint32_t index = 0; ; index++ )
+		{
+			std::uint64_t thunk_value = 0;
+
+			if ( !memory->read_memory ( module_base + name_thunk_rva + static_cast< std::uint64_t > ( index ) * 8, &thunk_value, 8 ) )
+			{
+				break;
+			}
+
+			if ( thunk_value == 0 )
+			{
+				break;
+			}
+
+			if ( ( thunk_value & 0x8000000000000000ULL ) != 0 )
+			{
+				continue; // imported by ordinal, not by name
+			}
+
+			char candidate[ 256 ] = { };
+
+			if ( !memory->read_memory ( module_base + ( thunk_value & 0xFFFFFFFF ) + 2, candidate, sizeof ( candidate ) - 1 ) )
+			{
+				continue;
+			}
+
+			if ( std::strncmp ( candidate, import_name, name_length + 1 ) != 0 )
+			{
+				continue;
+			}
+
+			std::uint64_t resolved = 0;
+
+			if ( !memory->read_memory ( module_base + first_thunk + static_cast< std::uint64_t > ( index ) * 8, &resolved, 8 ) )
+			{
+				return 0;
+			}
+
+			return resolved;
+		}
+	}
+}
+
+inline auto extcall::make_memcpy_hook ( ) -> extcall::hook_fn
+{
+	return [ ] ( cpu_state& cpu, const memory_handler& mem ) -> bool
+	{
+		const auto dst = cpu.read_gpr ( 1 );  // rcx
+		const auto src = cpu.read_gpr ( 2 );  // rdx
+		const auto size = cpu.read_gpr ( 8 ); // r8
+
+		if ( size > 0 )
+		{
+			std::vector< std::uint8_t > buffer ( size );
+
+			if ( !mem.read ( src, buffer.data ( ), size ) || !mem.write ( dst, buffer.data ( ), size ) )
+			{
+				return false;
+			}
+		}
+
+		cpu.write_gpr ( 0, dst ); // memcpy returns dst
+
+		return extcall::return_from_hook ( cpu, mem );
+	};
+}
+
+inline auto extcall::register_crt_import_hooks ( std::uint64_t module_base ) -> void
+{
+	struct crt_import_entry
+	{
+		const char* name;
+		hook_fn ( *make ) ( );
+	};
+
+	const crt_import_entry entries[ ] =
+	{
+		{ "memcpy", &extcall::make_memcpy_hook },
+		{ "memmove", &extcall::make_memcpy_hook },
+	};
+
+	for ( const auto& entry : entries )
+	{
+		if ( const auto target = extcall::resolve_import ( module_base, entry.name ) )
+		{
+			this->register_hook ( target, entry.make ( ) );
+		}
+	}
+}
+
 inline auto extcall::return_from_hook ( cpu_state& cpu, const memory_handler& mem ) -> bool
 {
 	const auto rsp = cpu.read_gpr ( 4 );
@@ -1111,6 +1251,10 @@ inline auto extcall::register_win32_hooks ( ) -> void
 		{ "WaitForSingleObjectEx", 0 },
 		{ "EnterCriticalSection", 0 },
 		{ "LeaveCriticalSection", 0 },
+		{ "AcquireSRWLockExclusive", 0 },
+		{ "ReleaseSRWLockExclusive", 0 },
+		{ "AcquireSRWLockShared", 0 },
+		{ "ReleaseSRWLockShared", 0 },
 		{ "FlsSetValue", 1 },
 		{ "FlsGetValue", 0 },
 		{ "GetLastError", 0 },
