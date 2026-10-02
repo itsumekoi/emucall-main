@@ -1551,6 +1551,12 @@ namespace instructions
 			else if ( src.type == operand_type::reg )
 			{
 				src_value = cpu.read_gpr ( src.reg );
+
+				/* without REX, byte registers 4-7 are AH, CH, DH and BH */
+				if ( src.size == operand_size::byte && !instr.has_rex && src.reg >= 4 && src.reg < 8 )
+				{
+					src_value = ( cpu.read_gpr ( src.reg - 4 ) >> 8 ) & 0xFF;
+				}
 			}
 			else
 			{
@@ -1567,6 +1573,11 @@ namespace instructions
 			if ( dst.type == operand_type::reg )
 			{
 				dst_value = cpu.read_gpr ( dst.reg );
+
+				if ( dst.size == operand_size::byte && !instr.has_rex && dst.reg >= 4 && dst.reg < 8 )
+				{
+					dst_value = ( cpu.read_gpr ( dst.reg - 4 ) >> 8 ) & 0xFF;
+				}
 			}
 			else if ( dst.type == operand_type::mem )
 			{

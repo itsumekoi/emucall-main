@@ -2,6 +2,8 @@
 #include <Windows.h>
 #include <cstdio>
 #include <array>
+#include <algorithm>
+#include <atomic>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -49,6 +51,16 @@ public:
 		std::uint64_t size;
 	};
 
+	/* one contiguous run of bytes an emulated call wrote to guest memory outside its own stack */
+	struct write_region
+	{
+		std::uint64_t address;
+		std::vector< std::uint8_t > bytes;
+	};
+
+	using commit_fn = std::function< bool ( std::uint64_t address, const void* buffer, std::size_t size ) >;
+	using filter_fn = std::function< bool ( const write_region& region ) >;
+
 	struct injected_tag
 	{
 	};
@@ -69,7 +81,7 @@ public:
 	static constexpr std::uint32_t tls_slot_size = 0x40;
 	static constexpr std::uint32_t default_execute_limit = 10000;
 
-	extcall ( ) = default;
+	extcall ( );
 	~extcall ( ) = default;
 
 	extcall ( const extcall& ) = delete;
@@ -81,6 +93,7 @@ public:
 
 	auto set_emulator ( emulator* emu ) -> void;
 	auto get_emulator ( ) const -> emulator*;
+	auto get_emulator_unlocked ( ) const -> emulator*;
 
 	auto set_execute_limit ( std::uint32_t limit ) -> void;
 	auto get_execute_limit ( ) const -> std::uint32_t;
@@ -95,6 +108,10 @@ public:
 	auto heap_read ( std::uint64_t address, void* buffer, std::size_t size ) const -> bool;
 	auto heap_write ( std::uint64_t address, const void* buffer, std::size_t size ) -> void;
 	auto heap_clear ( ) -> void;
+
+	auto pending_writes ( ) const -> std::vector< write_region >;
+	auto commit_writes ( std::uint64_t low, std::uint64_t high, const commit_fn& writer ) const -> std::size_t;
+	auto commit_writes ( const filter_fn& accept, const commit_fn& writer ) const -> std::size_t;
 
 	auto allocate ( std::size_t size ) -> std::uint64_t;
 	auto release ( std::uint64_t address ) -> bool;
@@ -141,6 +158,13 @@ private:
 	static auto read_c_string ( const memory_handler& mem, std::uint64_t address, std::size_t limit ) -> std::string;
 	auto is_known_address_locked ( std::uint64_t address ) const -> bool;
 
+	/* the emulator asks about every single instruction, so answering "nothing to do here" must not lock */
+	static auto hook_filter_slot ( std::uint64_t address ) -> std::size_t;
+	auto hook_filter_mark ( std::uint64_t address ) -> void;
+	auto hook_filter_test ( std::uint64_t address ) const -> bool;
+	auto publish_modules_locked ( ) -> void;
+	auto fast_reject ( std::uint64_t address ) const -> bool;
+
 	auto setup_fake_teb_locked ( emulator* emu ) const -> void;
 	auto setup_stack_locked ( emulator* emu ) const -> std::uint64_t;
 	auto prepare_locked ( emulator* emu ) -> std::uint64_t;
@@ -182,7 +206,136 @@ private:
 	std::unordered_map< std::uint64_t, std::uint8_t > m_heap;
 	std::unordered_map< std::uint64_t, std::size_t > m_allocations;
 	std::unordered_map< std::uint32_t, std::uint64_t > m_tls_overrides;
+
+	/* set only, never cleared: a stale bit is a false positive that just falls back to the locked path */
+	static constexpr std::size_t hook_filter_words = 128;
+	static constexpr std::uint64_t hook_filter_bits = hook_filter_words * 64;
+
+	static constexpr std::size_t fast_module_capacity = 32;
+
+	struct fast_module
+	{
+		std::atomic< std::uint64_t > base;
+		std::atomic< std::uint64_t > end;
+	};
+
+	std::atomic< std::uint64_t > m_hook_filter[ hook_filter_words ];
+
+	/* seqlock: an odd generation, or one that moves mid read, sends the reader to the locked path */
+	fast_module m_fast_modules[ fast_module_capacity ];
+	std::atomic< std::size_t > m_fast_module_count;
+	std::atomic< std::uint64_t > m_module_generation;
+	std::atomic< bool > m_fast_modules_usable;
 };
+
+inline extcall::extcall ( )
+{
+	for ( auto& word : this->m_hook_filter )
+	{
+		word.store ( 0, std::memory_order_relaxed );
+	}
+
+	for ( auto& entry : this->m_fast_modules )
+	{
+		entry.base.store ( 0, std::memory_order_relaxed );
+		entry.end.store ( 0, std::memory_order_relaxed );
+	}
+
+	this->m_fast_module_count.store ( 0, std::memory_order_relaxed );
+	this->m_module_generation.store ( 0, std::memory_order_relaxed );
+	this->m_fast_modules_usable.store ( true, std::memory_order_relaxed );
+}
+
+inline auto extcall::hook_filter_slot ( std::uint64_t address ) -> std::size_t
+{
+	auto value = address;
+
+	value ^= value >> 33;
+	value *= 0xFF51AFD7ED558CCDULL;
+	value ^= value >> 29;
+
+	return static_cast< std::size_t > ( value & ( extcall::hook_filter_bits - 1 ) );
+}
+
+inline auto extcall::hook_filter_mark ( std::uint64_t address ) -> void
+{
+	const auto slot = extcall::hook_filter_slot ( address );
+
+	this->m_hook_filter[ slot >> 6 ].fetch_or ( 1ULL << ( slot & 63 ), std::memory_order_release );
+}
+
+inline auto extcall::hook_filter_test ( std::uint64_t address ) const -> bool
+{
+	const auto slot = extcall::hook_filter_slot ( address );
+
+	return ( this->m_hook_filter[ slot >> 6 ].load ( std::memory_order_acquire ) & ( 1ULL << ( slot & 63 ) ) ) != 0ULL;
+}
+
+inline auto extcall::publish_modules_locked ( ) -> void
+{
+	this->m_module_generation.fetch_add ( 1, std::memory_order_acq_rel );
+
+	const auto usable = this->m_known_modules.size ( ) <= extcall::fast_module_capacity;
+
+	if ( usable )
+	{
+		for ( std::size_t index = 0; index < this->m_known_modules.size ( ); index++ )
+		{
+			const auto& entry = this->m_known_modules[ index ];
+
+			this->m_fast_modules[ index ].base.store ( entry.base, std::memory_order_relaxed );
+			this->m_fast_modules[ index ].end.store ( entry.base + entry.size, std::memory_order_relaxed );
+		}
+
+		this->m_fast_module_count.store ( this->m_known_modules.size ( ), std::memory_order_relaxed );
+	}
+
+	this->m_fast_modules_usable.store ( usable, std::memory_order_relaxed );
+
+	this->m_module_generation.fetch_add ( 1, std::memory_order_acq_rel );
+}
+
+inline auto extcall::fast_reject ( std::uint64_t address ) const -> bool
+{
+	/* a set bit only means "maybe", so anything that hashes here goes through the locked lookup */
+	if ( this->hook_filter_test ( address ) )
+	{
+		return false;
+	}
+
+	if ( !this->m_fast_modules_usable.load ( std::memory_order_acquire ) )
+	{
+		return false;
+	}
+
+	const auto before = this->m_module_generation.load ( std::memory_order_acquire );
+
+	if ( ( before & 1ULL ) != 0ULL )
+	{
+		return false;
+	}
+
+	const auto count = this->m_fast_module_count.load ( std::memory_order_relaxed );
+
+	/* with no modules registered the locked path never stubs, so the answer is the same either way */
+	auto settled = ( count == 0 );
+
+	for ( std::size_t index = 0; index < count && !settled; index++ )
+	{
+		const auto base = this->m_fast_modules[ index ].base.load ( std::memory_order_relaxed );
+		const auto end = this->m_fast_modules[ index ].end.load ( std::memory_order_relaxed );
+
+		settled = ( address >= base && address < end );
+	}
+
+	/* the snapshot has to have held still, otherwise it may have been half a rebuild */
+	if ( this->m_module_generation.load ( std::memory_order_acquire ) != before )
+	{
+		return false;
+	}
+
+	return settled;
+}
 
 inline auto extcall::instance ( ) -> extcall&
 {
@@ -202,6 +355,13 @@ inline auto extcall::get_emulator ( ) const -> emulator*
 {
 	const std::lock_guard< std::mutex > lock ( this->m_mutex );
 
+	return this->m_emulator;
+}
+
+/* call() holds m_mutex for its whole duration, so anything reading guest memory from inside a
+   hook has to reach the emulator without taking it again */
+inline auto extcall::get_emulator_unlocked ( ) const -> emulator*
+{
 	return this->m_emulator;
 }
 
@@ -375,6 +535,101 @@ inline auto extcall::heap_clear ( ) -> void
 	this->m_allocations.clear ( );
 	this->m_tls_overrides.clear ( );
 	this->m_malloc_offset = 0;
+}
+
+/* every emulator scratch area (stack, tls, string, result, malloc) sits inside the fake stack, so
+   the shadow heap holds exactly the writes aimed at real target memory: a changelog for the call */
+inline auto extcall::pending_writes ( ) const -> std::vector< extcall::write_region >
+{
+	const std::lock_guard< std::mutex > lock ( this->m_heap_mutex );
+
+	std::vector< extcall::write_region > regions;
+
+	if ( this->m_heap.empty ( ) )
+	{
+		return regions;
+	}
+
+	std::vector< std::uint64_t > addresses;
+
+	addresses.reserve ( this->m_heap.size ( ) );
+
+	for ( const auto& entry : this->m_heap )
+	{
+		addresses.push_back ( entry.first );
+	}
+
+	std::sort ( addresses.begin ( ), addresses.end ( ) );
+
+	for ( const auto address : addresses )
+	{
+		if ( !regions.empty ( ) && regions.back ( ).address + regions.back ( ).bytes.size ( ) == address )
+		{
+			regions.back ( ).bytes.push_back ( this->m_heap.at ( address ) );
+
+			continue;
+		}
+
+		extcall::write_region region;
+
+		region.address = address;
+		region.bytes.push_back ( this->m_heap.at ( address ) );
+
+		regions.push_back ( std::move ( region ) );
+	}
+
+	return regions;
+}
+
+inline auto extcall::commit_writes ( std::uint64_t low, std::uint64_t high, const extcall::commit_fn& writer ) const -> std::size_t
+{
+	if ( !writer || low >= high )
+	{
+		return 0;
+	}
+
+	std::size_t committed = 0;
+
+	for ( const auto& region : this->pending_writes ( ) )
+	{
+		/* whole regions only, so a stray write straddling the window can never ride along */
+		if ( region.address < low || region.address + region.bytes.size ( ) > high )
+		{
+			continue;
+		}
+
+		if ( writer ( region.address, region.bytes.data ( ), region.bytes.size ( ) ) )
+		{
+			committed += region.bytes.size ( );
+		}
+	}
+
+	return committed;
+}
+
+inline auto extcall::commit_writes ( const extcall::filter_fn& accept, const extcall::commit_fn& writer ) const -> std::size_t
+{
+	if ( !accept || !writer )
+	{
+		return 0;
+	}
+
+	std::size_t committed = 0;
+
+	for ( const auto& region : this->pending_writes ( ) )
+	{
+		if ( !accept ( region ) )
+		{
+			continue;
+		}
+
+		if ( writer ( region.address, region.bytes.data ( ), region.bytes.size ( ) ) )
+		{
+			committed += region.bytes.size ( );
+		}
+	}
+
+	return committed;
 }
 
 inline auto extcall::allocate ( std::size_t size ) -> std::uint64_t
@@ -834,6 +1089,9 @@ inline auto extcall::register_hook ( std::uint64_t address, extcall::hook_fn hoo
 {
 	const std::lock_guard< std::mutex > lock ( this->m_hook_mutex );
 
+	/* marked before the insert so a concurrent reader can never see the hook without the bit */
+	this->hook_filter_mark ( address );
+
 	this->m_hooks[ address ] = std::move ( hook );
 }
 
@@ -849,6 +1107,8 @@ inline auto extcall::register_module ( std::uint64_t base, std::uint64_t size ) 
 	const std::lock_guard< std::mutex > lock ( this->m_hook_mutex );
 
 	this->m_known_modules.push_back ( extcall::module_range{ base, size } );
+
+	this->publish_modules_locked ( );
 }
 
 inline auto extcall::register_module ( std::uint64_t base, const memory_handler& mem ) -> void
@@ -895,6 +1155,8 @@ inline auto extcall::clear_modules ( ) -> void
 	const std::lock_guard< std::mutex > lock ( this->m_hook_mutex );
 
 	this->m_known_modules.clear ( );
+
+	this->publish_modules_locked ( );
 }
 
 inline auto extcall::is_known_address_locked ( std::uint64_t address ) const -> bool
@@ -926,6 +1188,12 @@ inline auto extcall::auto_stubbed ( ) const -> std::vector< std::uint64_t >
 
 inline auto extcall::handle_external_call ( std::uint64_t address, cpu_state& cpu, const memory_handler& mem ) -> bool
 {
+	/* no hook can be here and the address belongs to a registered module, so the locked path would return false */
+	if ( this->fast_reject ( address ) )
+	{
+		return false;
+	}
+
 	extcall::hook_fn hook;
 
 	{
@@ -947,6 +1215,8 @@ inline auto extcall::handle_external_call ( std::uint64_t address, cpu_state& cp
 			this->m_auto_stubbed.push_back ( address );
 
 			hook = extcall::make_returning_hook ( 0 );
+
+			this->hook_filter_mark ( address );
 
 			this->m_hooks[ address ] = hook;
 		}

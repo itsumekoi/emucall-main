@@ -1,7 +1,9 @@
 #pragma once
 #include <Windows.h>
 #include <cstdio>
+#include <cstring>
 #include <array>
+#include <vector>
 #include "types.hpp"
 #include "state.hpp"
 #include "decoder.hpp"
@@ -36,10 +38,16 @@ public:
 	auto set_module_base ( std::uint64_t base ) -> void;
 	auto get_module_base ( ) const -> std::uint64_t;
 	auto set_call_trace_hook ( call_trace_fn fn ) -> void;
+	auto get_last_instruction_count ( ) const -> std::size_t;
+	auto get_last_faulted ( ) const -> bool;
+	auto flush_caches ( ) -> void;
 
 private:
 	auto execute ( const instruction& instr ) -> bool;
 	auto fetch_instruction ( std::uint64_t address, std::uint8_t* buffer, std::size_t max_size ) -> bool;
+	auto acquire_code_page ( std::uint64_t address ) -> const std::uint8_t*;
+	auto invalidate ( std::uint64_t address, std::size_t size ) -> void;
+	static auto on_guest_write ( void* context, std::uint64_t address, std::size_t size ) -> void;
 	auto is_control_flow_instruction ( instruction_type type ) const -> bool;
 	auto push_trace ( std::uint64_t rip, const std::uint8_t* bytes, std::uint8_t length, std::uint16_t type ) -> void;
 	auto dump_trace ( ) -> void;
@@ -63,6 +71,29 @@ private:
 		std::uint16_t type;
 	};
 
+	/* one backing read per 4 KiB of code instead of one per instruction fetch */
+	static constexpr std::size_t code_page_size = 4096;
+	static constexpr std::uint64_t code_page_mask = code_page_size - 1;
+	static constexpr std::size_t code_page_shift = 12;
+	static constexpr std::size_t code_cache_lines = 16;
+
+	/* decoding is address independent, so a decoded instruction stays valid until its bytes change */
+	static constexpr std::size_t decode_cache_lines = 4096;
+
+	struct code_line
+	{
+		std::uint64_t tag;
+		bool valid;
+		std::array< std::uint8_t, code_page_size > data;
+	};
+
+	struct decode_line
+	{
+		std::uint64_t tag;
+		bool valid;
+		instruction instr;
+	};
+
 	static constexpr std::size_t trace_capacity = 32;
 
 	std::uint64_t m_base;
@@ -75,12 +106,115 @@ private:
 	std::array< trace_entry, trace_capacity > m_trace;
 	std::size_t m_trace_head;
 	std::size_t m_trace_count;
+	std::size_t m_last_instruction_count;
+	bool m_last_faulted;
+
+	std::vector< code_line > m_code_cache;
+	std::vector< decode_line > m_decode_cache;
+
+	/* bounds of everything currently cached, so ordinary stack writes bail out on one compare */
+	std::uint64_t m_code_low;
+	std::uint64_t m_code_high;
 };
 
 inline emulator::emulator ( memory_read_fn read_callback, memory_write_fn write_callback )
 	: m_base ( 0 ), m_memory ( read_callback, write_callback ), m_should_stop ( false ), m_debug ( false ),
-	m_trace ( { } ), m_trace_head ( 0 ), m_trace_count ( 0 )
-{ }
+	m_trace ( { } ), m_trace_head ( 0 ), m_trace_count ( 0 ), m_last_instruction_count ( 0 ), m_last_faulted ( false ),
+	m_code_cache ( code_cache_lines ), m_decode_cache ( decode_cache_lines ),
+	m_code_low ( ~0ULL ), m_code_high ( 0 )
+{
+	this->flush_caches ( );
+
+	this->m_memory.set_write_notify ( &emulator::on_guest_write, this );
+}
+
+inline auto emulator::flush_caches ( ) -> void
+{
+	for ( auto& line : this->m_code_cache )
+	{
+		line.valid = false;
+		line.tag = 0;
+	}
+
+	for ( auto& line : this->m_decode_cache )
+	{
+		line.valid = false;
+		line.tag = 0;
+	}
+
+	this->m_code_low = ~0ULL;
+	this->m_code_high = 0;
+}
+
+inline auto emulator::on_guest_write ( void* context, std::uint64_t address, std::size_t size ) -> void
+{
+	static_cast< emulator* > ( context )->invalidate ( address, size );
+}
+
+inline auto emulator::invalidate ( std::uint64_t address, std::size_t size ) -> void
+{
+	/* the overwhelming majority of guest writes are stack traffic that never overlaps cached code */
+	if ( address >= this->m_code_high || address + size <= this->m_code_low )
+	{
+		return;
+	}
+
+	auto touched = false;
+
+	for ( auto& line : this->m_code_cache )
+	{
+		if ( !line.valid || address >= line.tag + code_page_size || address + size <= line.tag )
+		{
+			continue;
+		}
+
+		line.valid = false;
+		touched = true;
+	}
+
+	if ( !touched )
+	{
+		return;
+	}
+
+	/* no reverse map from bytes to decoded entries, so a genuine code write drops the whole decode cache */
+	for ( auto& line : this->m_decode_cache )
+	{
+		line.valid = false;
+	}
+}
+
+inline auto emulator::acquire_code_page ( std::uint64_t address ) -> const std::uint8_t*
+{
+	const auto page = address & ~code_page_mask;
+	auto& line = this->m_code_cache[ ( address >> code_page_shift ) & ( code_cache_lines - 1 ) ];
+
+	if ( line.valid && line.tag == page )
+	{
+		return line.data.data ( );
+	}
+
+	if ( !this->m_memory.read ( page, line.data.data ( ), code_page_size ) )
+	{
+		line.valid = false;
+		return nullptr;
+	}
+
+	line.tag = page;
+	line.valid = true;
+
+	if ( page < this->m_code_low )
+	{
+		this->m_code_low = page;
+	}
+
+	if ( page + code_page_size > this->m_code_high )
+	{
+		this->m_code_high = page + code_page_size;
+	}
+
+	return line.data.data ( );
+}
 
 inline auto emulator::set_debug ( bool value ) -> void
 {
@@ -122,17 +256,55 @@ inline auto emulator::set_call_trace_hook ( call_trace_fn fn ) -> void
 	this->m_call_trace_hook = std::move ( fn );
 }
 
+inline auto emulator::get_last_instruction_count ( ) const -> std::size_t
+{
+	return this->m_last_instruction_count;
+}
+
+inline auto emulator::get_last_faulted ( ) const -> bool
+{
+	return this->m_last_faulted;
+}
+
 inline auto emulator::reset ( ) -> void
 {
 	this->m_cpu.reset ( );
 	this->m_should_stop = false;
 	this->m_trace_head = 0;
 	this->m_trace_count = 0;
+
+	/* the shadow heap is cleared between calls, so cached bytes must not outlive what produced them */
+	this->flush_caches ( );
 }
 
 inline auto emulator::fetch_instruction ( std::uint64_t address, std::uint8_t* buffer, std::size_t max_size ) -> bool
 {
-	return this->m_memory.read ( address, buffer, max_size );
+	std::size_t copied = 0;
+
+	while ( copied < max_size )
+	{
+		const auto* const page = this->acquire_code_page ( address + copied );
+
+		if ( page == nullptr )
+		{
+			/* page granular read failed, so fall back to the exact read the caller asked for */
+			return this->m_memory.read ( address, buffer, max_size );
+		}
+
+		const auto offset = static_cast< std::size_t > ( ( address + copied ) & code_page_mask );
+		auto chunk = code_page_size - offset;
+
+		if ( chunk > max_size - copied )
+		{
+			chunk = max_size - copied;
+		}
+
+		std::memcpy ( buffer + copied, page + offset, chunk );
+
+		copied += chunk;
+	}
+
+	return true;
 }
 
 inline auto emulator::push_trace ( std::uint64_t rip, const std::uint8_t* bytes, std::uint8_t length, std::uint16_t type ) -> void
@@ -1187,28 +1359,41 @@ inline auto emulator::step ( std::uint64_t address ) -> bool
 
 	instruction instr;
 
-	if ( !this->m_decoder.decode ( instruction_bytes, sizeof ( instruction_bytes ), instr ) )
+	auto& decoded = this->m_decode_cache[ address & ( decode_cache_lines - 1 ) ];
+
+	if ( decoded.valid && decoded.tag == address )
 	{
-		this->log ( "[emu] FAIL decode rip=0x%llx (ida: 0x%llx) bytes=%02x %02x %02x %02x %02x %02x %02x %02x\n",
-					  static_cast< unsigned long long > ( address ),
-					  static_cast< unsigned long long > ( 0x180000000 + address - this->m_base ),
-					  instruction_bytes[ 0 ], instruction_bytes[ 1 ], instruction_bytes[ 2 ], instruction_bytes[ 3 ],
-					  instruction_bytes[ 4 ], instruction_bytes[ 5 ], instruction_bytes[ 6 ], instruction_bytes[ 7 ] );
-		return false;
+		instr = decoded.instr;
 	}
-
-	instr.address = address;
-
-	if ( instr.length == 0 || instr.length > 15 )
+	else
 	{
-		this->log ( "[emu] FAIL invalid length rip=0x%llx (ida: 0x%llx) len=%u bytes=%02x %02x %02x %02x %02x\n",
-					static_cast< unsigned long long > ( address ),
-					static_cast< unsigned long long > ( 0x180000000 + address - this->m_base ),
-					static_cast< unsigned > ( instr.length ),
-					instruction_bytes[ 0 ], instruction_bytes[ 1 ],
-					instruction_bytes[ 2 ], instruction_bytes[ 3 ],
-					instruction_bytes[ 4 ] );
-		return false;
+		if ( !this->m_decoder.decode ( instruction_bytes, sizeof ( instruction_bytes ), instr ) )
+		{
+			this->log ( "[emu] FAIL decode rip=0x%llx (ida: 0x%llx) bytes=%02x %02x %02x %02x %02x %02x %02x %02x\n",
+						  static_cast< unsigned long long > ( address ),
+						  static_cast< unsigned long long > ( 0x180000000 + address - this->m_base ),
+						  instruction_bytes[ 0 ], instruction_bytes[ 1 ], instruction_bytes[ 2 ], instruction_bytes[ 3 ],
+						  instruction_bytes[ 4 ], instruction_bytes[ 5 ], instruction_bytes[ 6 ], instruction_bytes[ 7 ] );
+			return false;
+		}
+
+		instr.address = address;
+
+		if ( instr.length == 0 || instr.length > 15 )
+		{
+			this->log ( "[emu] FAIL invalid length rip=0x%llx (ida: 0x%llx) len=%u bytes=%02x %02x %02x %02x %02x\n",
+						static_cast< unsigned long long > ( address ),
+						static_cast< unsigned long long > ( 0x180000000 + address - this->m_base ),
+						static_cast< unsigned > ( instr.length ),
+						instruction_bytes[ 0 ], instruction_bytes[ 1 ],
+						instruction_bytes[ 2 ], instruction_bytes[ 3 ],
+						instruction_bytes[ 4 ] );
+			return false;
+		}
+
+		decoded.tag = address;
+		decoded.valid = true;
+		decoded.instr = instr;
 	}
 
 	this->log ( "[emu] rip=0x%llx (ida: 0x%llx) type=%d len=%u\n",
@@ -1267,8 +1452,10 @@ inline auto emulator::run ( std::uint64_t start_address, std::uint64_t end_addre
 {
 	this->m_cpu.rip = start_address;
 	this->m_should_stop = false;
+	this->m_last_instruction_count = 0;
+	this->m_last_faulted = false;
 
-	std::size_t instruction_count = 0;
+	auto& instruction_count = this->m_last_instruction_count;
 
 	while ( !this->m_should_stop && instruction_count < max_instructions )
 	{
@@ -1280,12 +1467,14 @@ inline auto emulator::run ( std::uint64_t start_address, std::uint64_t end_addre
 
 		if ( this->m_cpu.rip == 0 )
 		{
+			this->m_last_faulted = true;
 			this->log ( "[emu] run FAIL null rip at instruction_count=%zu\n", instruction_count );
 			return false;
 		}
 
 		if ( !this->step ( this->m_cpu.rip ) )
 		{
+			this->m_last_faulted = true;
 			this->log ( "[emu] run FAIL at instruction_count=%zu rip=0x%llx\n",
 						instruction_count, static_cast< unsigned long long > ( this->m_cpu.rip ) );
 			return false;

@@ -1,6 +1,6 @@
 # emucall-main
 
-`emucall` calls functions inside another process without injecting into it. It is a from-scratch x86-64 interpreter: it reads the target's own instruction bytes over `ReadProcessMemory` and executes them in your address space against a virtual CPU, a fake stack and a synthetic thread environment. No module is loaded into the target, no thread is hijacked, and nothing is written to it.
+`emucall` calls functions inside another process without injecting into it. It is a from-scratch x86-64 interpreter: it reads the target's own instruction bytes over `ReadProcessMemory` and executes them in your address space against a virtual CPU, a fake stack and a synthetic thread environment. No module is loaded into the target and no thread is hijacked. The example keeps writes in emulated memory; applying captured writes to the target is optional and requires an explicit caller-provided writer.
 
 It works against any x86-64 Windows process — the development target happened to be an IL2CPP Unity game, but nothing in the emulator assumes one.
 
@@ -45,6 +45,17 @@ const auto result = caller->call< std::uint64_t > ( base + rva, argument );
 
 The two callbacks decide where each access goes — the fake stack, the emulated heap, or the real process. `main.cpp` is a working skeleton of that wiring.
 
+Instruction fetches use a code-page cache and a decoded-instruction cache.
+Guest writes invalidate affected cached code, and resetting the emulator flushes
+both caches. `get_last_instruction_count()` and `get_last_faulted()` report the
+last run's execution count and whether it stopped on a fault.
+
+`pending_writes()` groups shadow-heap writes into contiguous regions. The
+`commit_writes()` overloads accept either an address window or a region filter,
+plus a writer callback. They apply only accepted whole regions and return the
+number of bytes accepted by the writer; they do not automatically write to the
+target. Captured writes remain available until the shadow heap is cleared.
+
 Instance methods take the `this` pointer as the first argument, and `extcall::injected` marks calls whose arguments are already staged in the emulated heap:
 
 ```cpp
@@ -80,7 +91,9 @@ Windows x64, C++20, MSVC. Open `emucall.slnx` and build Release|x64, or:
 msbuild emucall.slnx /p:Configuration=Release /p:Platform=x64
 ```
 
-`mem_lib` opens the target with `PROCESS_ALL_ACCESS` but only ever reads from it — no write path is exposed.
+`mem_lib` opens the target with `PROCESS_ALL_ACCESS` and exposes both
+`read_memory()` and `write_memory()`. The example uses only the read operation;
+its emulated write callback updates local shadow memory.
 
 ## License
 

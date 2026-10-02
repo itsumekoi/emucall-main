@@ -14,6 +14,16 @@ public:
 		return ReadProcessMemory ( this->handle, ( LPVOID )address, buffer, size, nullptr );
 	}
 
+	auto write_memory ( std::uintptr_t address, const void* buffer, std::size_t size ) -> bool
+	{
+		if ( !address || !buffer || !size )
+		{
+			return false;
+		}
+
+		return WriteProcessMemory ( this->handle, ( LPVOID )address, const_cast< void* >( buffer ), size, nullptr );
+	}
+
 	auto get_module_base ( std::uint32_t pid, const wchar_t* name ) -> std::uint64_t
 	{
 		if ( !pid || !name )

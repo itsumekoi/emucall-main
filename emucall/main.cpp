@@ -2,7 +2,7 @@
 
 auto main ( ) -> std::int32_t
 {
-	if ( !memory->attach ( L"game.exe" ) )
+	if ( !memory->attach ( L"RustClient.exe" ) )
 	{
 		return 1;
 	}
@@ -41,6 +41,9 @@ auto main ( ) -> std::int32_t
 			return true;
 		}
 	);
+
+	/* without this the "ida:" column in the trace is just rip + 0x180000000 rather than a real rebase */
+	cpu.set_module_base ( memory->game_assembly );
 
 	caller->set_emulator ( &cpu );
 

@@ -9,11 +9,16 @@
 using memory_read_fn = std::function< bool ( std::uint64_t address, void* buffer, std::size_t size ) >;
 using memory_write_fn = std::function< bool ( std::uint64_t address, const void* buffer, std::size_t size ) >;
 
+/* raw pointer rather than std::function so a guest write costs one predictable branch */
+using write_notify_fn = void ( * ) ( void* context, std::uint64_t address, std::size_t size );
+
 class memory_handler
 {
 public:
 	memory_handler ( memory_read_fn read_callback, memory_write_fn write_callback );
 	~memory_handler ( ) = default;
+
+	auto set_write_notify ( write_notify_fn callback, void* context ) -> void;
 
 	auto read ( std::uint64_t address, void* buffer, std::size_t size ) const -> bool;
 
@@ -33,9 +38,18 @@ private:
 	memory_read_fn m_read;
 	memory_write_fn m_write;
 
+	write_notify_fn m_notify = nullptr;
+	void* m_notify_context = nullptr;
+
 	mutable std::uint64_t m_last_fault_address = 0;
 	mutable bool m_last_fault_was_write = false;
 };
+
+inline auto memory_handler::set_write_notify ( write_notify_fn callback, void* context ) -> void
+{
+	this->m_notify = callback;
+	this->m_notify_context = context;
+}
 
 inline memory_handler::memory_handler ( memory_read_fn read_callback, memory_write_fn write_callback )
 	: m_read ( read_callback ), m_write ( write_callback )
@@ -68,6 +82,11 @@ inline auto memory_handler::write ( std::uint64_t address, const void* buffer, s
 		this->m_last_fault_address = address;
 		this->m_last_fault_was_write = true;
 		return false;
+	}
+
+	if ( this->m_notify != nullptr )
+	{
+		this->m_notify ( this->m_notify_context, address, size );
 	}
 
 	return true;

@@ -13,6 +13,14 @@ public:
 	auto decode ( const std::uint8_t* bytes, std::size_t max_length, instruction& instr ) -> bool;
 
 private:
+	/* the longest legal x86 instruction */
+	static constexpr std::size_t max_instruction_length = 15;
+
+	/* zeroed tail behind the copied bytes: opcode handlers read immediates and displacements before
+	   checking they exist, so an overrun lands here instead of past the caller's buffer */
+	static constexpr std::size_t decode_padding = 32;
+
+	auto decode_bounded ( const std::uint8_t* bytes, std::size_t max_length, instruction& instr ) -> bool;
 
 	auto parse_prefixes ( const std::uint8_t* bytes, std::size_t& offset, instruction& instr ) -> void;
 
@@ -21,14 +29,14 @@ private:
 	auto parse_modrm ( const std::uint8_t* bytes, std::size_t& offset, std::size_t max_length,
 					   instruction& instr, operand& op ) -> bool;
 
-	auto parse_sib ( const std::uint8_t* bytes, std::size_t& offset, instruction& instr,
+	auto parse_sib ( const std::uint8_t* bytes, std::size_t& offset, std::size_t max_length, instruction& instr,
 					 memory_operand& mem, std::uint8_t mod ) -> bool;
 
-	auto parse_displacement ( const std::uint8_t* bytes, std::size_t& offset,
-							  std::uint8_t mod, memory_operand& mem ) -> void;
+	auto parse_displacement ( const std::uint8_t* bytes, std::size_t& offset, std::size_t max_length,
+							  std::uint8_t mod, memory_operand& mem ) -> bool;
 
-	auto parse_immediate ( const std::uint8_t* bytes, std::size_t& offset,
-						   operand_size size, std::uint64_t& imm ) -> void;
+	auto parse_immediate ( const std::uint8_t* bytes, std::size_t& offset, std::size_t max_length,
+						   operand_size size, std::uint64_t& imm ) -> bool;
 
 	auto get_register ( std::uint8_t modrm_field, bool rex_bit ) const -> std::uint8_t;
 
@@ -204,24 +212,41 @@ inline auto decoder::get_register ( std::uint8_t modrm_field, bool rex_bit ) con
 	return modrm_field | ( rex_bit ? 0x08 : 0x00 );
 }
 
-inline auto decoder::parse_displacement ( const std::uint8_t* bytes, std::size_t& offset,
-										  std::uint8_t mod, memory_operand& mem ) -> void
+inline auto decoder::parse_displacement ( const std::uint8_t* bytes, std::size_t& offset, std::size_t max_length,
+										  std::uint8_t mod, memory_operand& mem ) -> bool
 {
 	if ( mod == 0x01 )
 	{
+		if ( offset + 1 > max_length )
+		{
+			return false;
+		}
+
 		mem.displacement = static_cast< std::int8_t >( bytes[ offset ] );
 		offset++;
 	}
 	else if ( mod == 0x02 )
 	{
+		if ( offset + 4 > max_length )
+		{
+			return false;
+		}
+
 		std::memcpy ( &mem.displacement, &bytes[ offset ], 4 );
 		offset += 4;
 	}
+
+	return true;
 }
 
-inline auto decoder::parse_sib ( const std::uint8_t* bytes, std::size_t& offset, instruction& instr,
+inline auto decoder::parse_sib ( const std::uint8_t* bytes, std::size_t& offset, std::size_t max_length, instruction& instr,
 								 memory_operand& mem, std::uint8_t mod ) -> bool
 {
+	if ( offset >= max_length )
+	{
+		return false;
+	}
+
 	const auto sib = bytes[ offset++ ];
 
 	const auto scale_bits = ( sib >> 6 ) & 0x03;
@@ -280,6 +305,11 @@ inline auto decoder::parse_modrm ( const std::uint8_t* bytes, std::size_t& offse
 
 		if ( mod == 0x00 && rm == 0x05 )
 		{
+			if ( offset + 4 > max_length )
+			{
+				return false;
+			}
+
 			op.mem.base = 16;
 			op.mem.index = 0xFF;
 			op.mem.scale = 1;
@@ -292,39 +322,54 @@ inline auto decoder::parse_modrm ( const std::uint8_t* bytes, std::size_t& offse
 
 		else if ( rm == 0x04 )
 		{
-			if ( offset >= max_length )
+			if ( !this->parse_sib ( bytes, offset, max_length, instr, op.mem, mod ) )
 			{
 				return false;
 			}
 
-			this->parse_sib ( bytes, offset, instr, op.mem, mod );
-
 			if ( mod == 0x00 && op.mem.base == 0xFF )
 			{
+				if ( offset + 4 > max_length )
+				{
+					return false;
+				}
+
 				std::int32_t disp32 = 0;
 				std::memcpy ( &disp32, &bytes[ offset ], 4 );
 				offset += 4;
 				op.mem.displacement = disp32;
 			}
-			else
+			else if ( !this->parse_displacement ( bytes, offset, max_length, mod, op.mem ) )
 			{
-				this->parse_displacement ( bytes, offset, mod, op.mem );
+				return false;
 			}
 		}
 
 		else
 		{
 			op.mem.base = this->get_register ( rm, instr.rex_b );
-			this->parse_displacement ( bytes, offset, mod, op.mem );
+
+			if ( !this->parse_displacement ( bytes, offset, max_length, mod, op.mem ) )
+			{
+				return false;
+			}
 		}
 	}
 
 	return true;
 }
 
-inline auto decoder::parse_immediate ( const std::uint8_t* bytes, std::size_t& offset,
-									   operand_size size, std::uint64_t& imm ) -> void
+inline auto decoder::parse_immediate ( const std::uint8_t* bytes, std::size_t& offset, std::size_t max_length,
+									   operand_size size, std::uint64_t& imm ) -> bool
 {
+	/* operand_size values are byte widths; oword and yword never reach here as immediates */
+	const auto width = static_cast< std::size_t >( size );
+
+	if ( width <= 8 && offset + width > max_length )
+	{
+		return false;
+	}
+
 	switch ( size )
 	{
 		case operand_size::byte:
@@ -360,6 +405,8 @@ inline auto decoder::parse_immediate ( const std::uint8_t* bytes, std::size_t& o
 			break;
 		}
 	}
+
+	return true;
 }
 
 inline auto decoder::decode_mov ( const std::uint8_t* bytes, std::size_t& offset,
@@ -449,8 +496,11 @@ inline auto decoder::decode_mov ( const std::uint8_t* bytes, std::size_t& offset
 
 			instr.operands[ 1 ].type = operand_type::imm;
 
-			this->parse_immediate ( bytes, offset, instr.rex_w ? operand_size::qword : operand_size::dword,
-							  instr.operands[ 1 ].imm );
+			if ( !this->parse_immediate ( bytes, offset, max_length, instr.rex_w ? operand_size::qword : operand_size::dword,
+									  instr.operands[ 1 ].imm ) )
+			{
+				return false;
+			}
 
 			instr.operand_count = 2;
 			break;
@@ -4288,6 +4338,29 @@ inline auto decoder::decode_vex ( const std::uint8_t* bytes, std::size_t& offset
 
 
 inline auto decoder::decode ( const std::uint8_t* bytes, std::size_t max_length, instruction& instr ) -> bool
+{
+	if ( !bytes || max_length < 2 )
+	{
+		return false;
+	}
+
+	/* never read past max_length from the caller, however far a handler runs ahead */
+	const auto limit = max_length < max_instruction_length ? max_length : max_instruction_length;
+
+	std::uint8_t padded[ max_instruction_length + decode_padding ] = { };
+
+	std::memcpy ( padded, bytes, limit );
+
+	if ( !this->decode_bounded ( padded, limit, instr ) )
+	{
+		return false;
+	}
+
+	/* a handler that ran past the bytes it was given decoded padding, not the instruction */
+	return instr.length <= limit;
+}
+
+inline auto decoder::decode_bounded ( const std::uint8_t* bytes, std::size_t max_length, instruction& instr ) -> bool
 {
 	if ( !bytes || max_length < 2 )
 	{
